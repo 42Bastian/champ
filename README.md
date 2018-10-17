@@ -148,7 +148,7 @@ We can also watch pairs of variables by separating them with a comma in the cham
         DEX         ; @Xu(post) @Au,FOO(post)
 ```
 
-This will plot FOO against X:
+This will plot FOO against A:
 
 ![FOO against A at PC 0x6015](doc/example03_3.gif?raw=true)
 
@@ -191,6 +191,29 @@ To disable a watch, add a `;` right behind the `@`:
 ```
         ADC FOO     ; @;Au(post)
 ```
+
+### Error reporting
+
+Should your program run into an error, champ shows you where in the source code the error occured and an execution log of the previous 20 CPU steps (you can increase the size of the log with `--error-log-size`).
+Look at this example ([example05.yaml](example05.yaml) / [example05.s](example05.s)):
+
+```
+        DSK test
+        MX %11
+        ORG $6000
+        
+        LDX #$ff
+COUNT   PHA
+        PHA
+        DEX
+        BNE COUNT
+```
+
+This is a program which repeatedly pushes the A register onto the stack until the stack is full. Stack overflow, mission accomplished! Champ will generate the following output:
+
+![Error report](doc/example05_1.gif?raw=true)
+
+On the left hand side you can see that the error occured in example05.s, line 7, while attempting a `PHA` operation when `SP` is already down to zero from previous `PHA` operations (as can be seen on the right).
 
 ## Did you know?
 

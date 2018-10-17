@@ -31,6 +31,7 @@ uint64_t frame_count = 0;
 
 uint16_t start_pc = 0x6000;
 uint16_t start_frame_pc = 0xffff;
+uint16_t old_pc = 0;
 
 uint16_t yoffset[192] = {
     0x0000, 0x0400, 0x0800, 0x0c00, 0x1000, 0x1400, 0x1800, 0x1c00,
@@ -98,6 +99,7 @@ typedef struct {
 } r_watch;
 
 r_watch *watches = 0;
+uint8_t watches_allocated = 0;
 size_t watch_count = 0;
 int32_t watch_offset_for_pc_and_post[0x20000];
 
@@ -150,6 +152,9 @@ void push(uint8_t value)
 {
     if (cpu.sp == 0)
     {
+        printf("error %04x Stack overflow\n", old_pc);
+        fflush(stdout);
+
         fprintf(stderr, "Stack overflow!\n");
         exit(1);
     }
@@ -161,6 +166,8 @@ uint8_t pop()
 {
     if (cpu.sp == 0xff)
     {
+        printf("error %04x Stack underrun\n", old_pc);
+        fflush(stdout);
         fprintf(stderr, "Stack underrun!\n");
         exit(1);
     }
@@ -564,7 +571,7 @@ void branch(uint8_t condition, int8_t offset, uint8_t* cycles)
 
 void handle_next_opcode()
 {
-    uint16_t old_pc = cpu.pc;
+    old_pc = cpu.pc;
 
     // fetch opcode, addressing mode and cycles for next instruction
     uint8_t read_opcode = 0;
@@ -575,6 +582,9 @@ void handle_next_opcode()
 
     if (opcode == NO_OPCODE || addressing_mode == NO_ADDRESSING_MODE)
     {
+        printf("error %04x Unhandled opcode: %02x\n", old_pc, read_opcode);
+        fflush(stdout);
+        
         fprintf(stderr, "Unhandled opcode at %04x: %02x\n", old_pc, read_opcode);
         exit(1);
     }
@@ -631,13 +641,6 @@ void handle_next_opcode()
                 cycles += 1;
             target_address += temp;
             break;
-    }
-
-    if (show_log)
-    {
-        fprintf(stderr, "# %04x | %d | %02x | %s %-18s | ", old_pc, cycles, read_opcode, OPCODE_STRINGS[opcode],
-            ADDRESSING_MODE_STRINGS[addressing_mode]
-        );
     }
 
     int unhandled_opcode = 0;
@@ -948,7 +951,10 @@ void handle_next_opcode()
     };
     if (unhandled_opcode)
     {
-        fprintf(stderr, "Opcode %s not implemented yet at PC 0x%04x\n",
+        printf("error %04x Opcode %s not implemented yet.\n",
+               old_pc, OPCODE_STRINGS[opcode]);
+        fflush(stdout);
+        fprintf(stderr, "Opcode %s not implemented yet at PC 0x%04x.\n",
                 OPCODE_STRINGS[opcode], cpu.pc);
         exit(1);
     }
@@ -957,17 +963,9 @@ void handle_next_opcode()
         cycles_per_function[trace_stack_function[trace_stack_pointer + 1]] += cycles;
     if (show_log)
     {
-        char flags_str[6];
-        flags_str[0] = test_flag(CARRY) ? 'C' : 'c';
-        flags_str[1] = test_flag(ZERO) ? 'Z' : 'z';
-        flags_str[2] = test_flag(DECIMAL_MODE) ? 'D' : 'd';
-        flags_str[3] = test_flag(OVERFLOW) ? 'V' : 'v';
-        flags_str[4] = test_flag(NEGATIVE) ? 'N' : 'n';
-        flags_str[5] = 0;
-
-        fprintf(stderr, "A: %02x, X: %02x, Y: %02x, PC: %04x, SP: %02x, FLAGS: %02x %s | %10ld |",
-               cpu.a, cpu.x, cpu.y, cpu.pc, cpu.sp, cpu.flags, flags_str, cpu.total_cycles);
-        fprintf(stderr, "\n");
+        printf("log %04x %02x %02x %02x %04x %02x %02x\n",
+               old_pc, cpu.a, cpu.x, cpu.y, cpu.pc, cpu.sp, cpu.flags);
+        fflush(stdout);
     }
 }
 
@@ -1079,10 +1077,14 @@ int main(int argc, char** argv)
     int watch_index = 0;
     while (fgets(s, 1024, stdin))
     {
-        if (!watches)
+        if (s[0] == '\n')
+            break;
+        if (!watches_allocated)
         {
             watch_count = parse_int(s, 0);
-            watches = malloc(sizeof(r_watch) * watch_count);
+            if (watch_count > 0)
+                watches = malloc(sizeof(r_watch) * watch_count);
+            watches_allocated = 1;
         }
         else
         {

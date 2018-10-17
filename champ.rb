@@ -48,6 +48,7 @@ class Champ
             STDERR.puts 'Usage: ./champ.rb [options] <config.yaml>'
             STDERR.puts 'Options:'
             STDERR.puts '  --max-frames <n>'
+            STDERR.puts '  --error-log-size <n> (default: 20)'
             STDERR.puts '  --no-animation'
             exit(1)
         end
@@ -58,11 +59,19 @@ class Champ
         @max_frames = nil
         @record_frames = true
         @cycles_per_function = {}
+        @execution_log = []
+        @execution_log_size = 20
+        @code_for_pc = {}
+        @source_for_file = {}
+        @max_source_width_for_file = {}
+        @pc_for_file_and_line = {}
         args = ARGV.dup
         while args.size > 1
             item = args.shift
             if item == '--max-frames'
                 @max_frames = args.shift.to_i
+            elsif item == '--error-log-size'
+                @execution_log_size = args.shift.to_i
             elsif item == '--no-animation'
                 @record_frames = false
             else
@@ -189,7 +198,7 @@ class Champ
             @max_cycle_count = 0
             call_stack = []
             last_call_stack_cycles = 0
-            Open3.popen2("./p65c02 #{@record_frames ? '' : '--no-screen'} --hide-log --start-pc #{start_pc} #{File.join(temp_dir, 'disk_image')}") do |stdin, stdout, thread|
+            Open3.popen2("./p65c02 #{@record_frames ? '' : '--no-screen'} --start-pc #{start_pc} #{File.join(temp_dir, 'disk_image')}") do |stdin, stdout, thread|
                 stdin.puts watch_input.split("\n").size
                 stdin.puts watch_input
                 stdin.close
@@ -205,7 +214,19 @@ class Champ
                     stdout.each_line do |line|
 #                         puts "> #{line}"
                         parts = line.split(' ')
-                        if parts.first == 'jsr'
+                        if parts.first == 'error'
+                            parts.shift
+                            pc = parts.shift.to_i(16)
+                            message = parts.join(' ')
+                            @error = {:pc => pc, :message => message}
+                        elsif parts.first == 'log'
+                            parts.shift
+                            log = parts.map { |x| x.to_i(16) }
+                            @execution_log << log
+                            while @execution_log.size > @execution_log_size
+                                @execution_log.shift
+                            end
+                        elsif parts.first == 'jsr'
                             pc = parts[1].to_i(16)
                             cycles = parts[2].to_i
                             @max_cycle_count = cycles
@@ -725,9 +746,9 @@ class Champ
                 io.puts "overlap = false;"
                 io.puts "rankdir = LR;"
                 io.puts "splines = true;"
-                io.puts "graph [fontname = Helvetica, fontsize = 9, size = \"14, 11\", nodesep = 0.2, ranksep = 0.3, ordering = out];"
-                io.puts "node [fontname = Helvetica, fontsize = 9, shape = rect, style = filled, fillcolor = \"#fce94f\" color = \"#c4a000\"];"
-                io.puts "edge [fontname = Helvetica, fontsize = 9, color = \"#444444\"];"
+                io.puts "graph [fontname = Arial, fontsize = 8, size = \"14, 11\", nodesep = 0.2, ranksep = 0.3, ordering = out];"
+                io.puts "node [fontname = Arial, fontsize = 8, shape = rect, style = filled, fillcolor = \"#fce94f\" color = \"#c4a000\"];"
+                io.puts "edge [fontname = Arial, fontsize = 8, color = \"#444444\"];"
                 all_nodes.each do |node|
                     label = @label_for_pc[node] || sprintf('0x%04x', node)
                     label = "<B>#{label}</B>"
@@ -736,13 +757,21 @@ class Champ
                     end
                     io.puts "  _#{node} [label = <#{label}>];"
                 end
+                max_call_count = 0
+                @call_graph_counts.each_pair do |key, entries|
+                    entries.values.each do |count|
+                        max_call_count = count if count > max_call_count
+                    end
+                end
+
                 @call_graph_counts.each_pair do |key, entries|
                     entries.keys.each do |other_key|
-                        io.puts "_#{key} -> _#{other_key} [label = \"#{entries[other_key]}x\"];"
+                        penwidth = 0.5 + ((entries[other_key].to_f / max_call_count) ** 0.3) * 2
+                        io.puts "_#{key} -> _#{other_key} [label = \"#{entries[other_key]}x\", penwidth = #{penwidth}];"
                     end
                 end
                 io.puts "}"
-                
+
                 dot = io.string
                 
                 svg = Open3.popen2('dot -Tsvg') do |stdin, stdout, thread|
@@ -756,6 +785,54 @@ class Champ
                 report.sub!('#{call_graph}', svg)
             else
                 report.sub!('#{call_graph}', '<em>(GraphViz not installed)</em>')
+            end
+            
+            # write error dump
+            if @error
+                io = StringIO.new
+                io.puts "<div style='float: left; margin-right: 10px;'>"
+                io.puts "<h2>Source code</h2>"
+                
+                io.puts "<code><pre>"
+                source_code = @code_for_pc[@error[:pc]]
+                offset = source_code[:line] - 1
+                this_filename = source_code[:file]
+                format_str = "%-#{@max_source_width_for_file[this_filename]}s"
+                io.puts "<span class='heading'> Line |   PC   | #{sprintf(format_str, this_filename)}</span>"
+                ((offset - 16)..(offset + 16)).each do |i|
+                    next if i < 0 || i >= @source_for_file[this_filename].size
+                    io.print "<span class='#{(i == offset) ? 'error' : 'code'}'>"
+                    line_pc = nil
+                    if @pc_for_file_and_line[this_filename]
+                        if @pc_for_file_and_line[this_filename][i + 1]
+                            line_pc = sprintf('0x%04x', @pc_for_file_and_line[this_filename][i + 1])
+                        end
+                    end
+                    line_pc ||= ''
+                    io.print sprintf("%5d | %6s | %-#{@max_source_width_for_file[this_filename]}s", i + 1, line_pc, @source_for_file[this_filename][i])
+                    io.print "</span>" if i == offset
+                    io.puts
+                end
+                io.puts "</pre></code>"
+                io.puts "</div>"
+                
+                io.puts "<div style='display: inline-block;'>"
+                io.puts "<h2>Execution log</h2>"
+                io.puts "<code><pre>"
+                io.puts sprintf("<span class='heading'>   PC    |    A     X     Y     PC      SP  Flags </span>")
+                @execution_log.each do |item|
+                    io.puts sprintf("<span class='code'> 0x%04x  |  0x%02x  0x%02x  0x%02x  0x%04x  0x%02x  0x%02x  </span>", *item)
+                end
+                io.puts sprintf("<span class='error'> 0x%04x  |  %-37s </span>", @error[:pc], @error[:message])
+                io.puts "</pre></code>"
+                
+                io.puts "</div>"
+                
+                io.puts "<div style='clear: both;'></div>"
+                
+                report.sub!('#{error}', io.string)
+            else
+                report.sub!('#{error}', '')
             end
             
             f.puts report
@@ -774,9 +851,14 @@ class Champ
     end
 
     def parse_merlin_output(path)
+        input_file = File.basename(@source_path)
+        @source_for_file[input_file] = File.read(@source_path).split("\n").map { |x| x.gsub("\t", ' ' * 4) }
+        @max_source_width_for_file[input_file] = [@source_for_file[input_file].map { |x| x.size }.max, 40].max
+
         @source_line = -3
         File.open(path, 'r') do |f|
             f.each_line do |line|
+                @pc_for_file_and_line[input_file] ||= {}
                 @source_line += 1
                 parts = line.split('|')
                 next unless parts.size > 2
@@ -787,8 +869,16 @@ class Champ
                     pc = parts[6].split(' ').first.split('/').last.to_i(16)
                     code = parts[7].strip
                     code_parts = code.split(/\s+/)
-                    next if code_parts.empty?
 
+                    line_number = parts[1].split(' ').map { |x| x.strip }.reject { |x| x.empty? }.last.to_i
+                    @code_for_pc[pc] = {
+                        :file => input_file,
+                        :line => line_number,
+                    }
+                    @pc_for_file_and_line[input_file][line_number] = pc
+                            
+                    
+                    next if code_parts.empty?
                     label = nil
 
                     champ_directives = []
@@ -826,7 +916,6 @@ class Champ
                     elsif line_type == 'Code'
                         @watches[pc] ||= []
                         champ_directives.each do |directive|
-                            line_number = parts[1].split(' ').map { |x| x.strip }.reject { |x| x.empty? }.last.to_i
                             watch = parse_champ_directive(directive, false)
                             watch[:line_number] = line_number
                             watch[:pc] = pc
@@ -941,9 +1030,23 @@ __END__
         text-align: left;
         padding: 0 0.5em;
     }
+    .heading {
+        color: #2e3436;
+        background-color: #babdb6;
+        font-weight: bold;
+    }
+    .code {
+        color: #555753;
+        background-color: #edeeec;
+    }
+    .error {
+        color: #cc0000;
+        background-color: #f2bfbf;
+    }
     </style>
 </head>
 <body>
+#{error}
 <div style='float: left; padding-right: 10px;'>
     <h2>Frames</h2>
     #{screenshots}
